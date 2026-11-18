@@ -23,6 +23,18 @@ export default function MtprotoFields() {
       setValue('settings.preferIp', 'prefer-ipv4', { shouldDirty: true });
     }
   }, [routeThroughXray, getValues, setValue]);
+  const isTelemt =
+    (useWatch({ control, name: 'settings.backend' }) as string | undefined) === 'telemt';
+  // telemt serves plain ee clients only, so dd and WEB links must not survive the switch.
+  useEffect(() => {
+    if (!isTelemt) return;
+    if (getValues('settings.secured')) {
+      setValue('settings.secured', false, { shouldDirty: true });
+    }
+    if (getValues('settings.web.bindTo')) {
+      setValue('settings.web', {}, { shouldDirty: true });
+    }
+  }, [isTelemt, getValues, setValue]);
   const routeIpv6 = routeThroughXray && (preferIp === 'prefer-ipv6' || preferIp === 'only-ipv6');
   const routeAdTags = routeThroughXray && (clients ?? []).some((c) => c?.adTag?.trim());
   const dcPoolEnabled = useWatch({ control, name: 'settings.dcPool.enabled' }) as
@@ -366,8 +378,47 @@ export default function MtprotoFields() {
     },
   ];
 
+  const telemtSections = [
+    {
+      key: 'telemt',
+      label: f('telemtAdvanced'),
+      children: [
+        field(
+          ['telemt', 'maxTcpConnsPerUser'],
+          'telemtMaxTcpConnsPerUser',
+          num(0, 65535, '0'),
+          'telemtMaxTcpConnsPerUserHint',
+        ),
+        field(
+          ['telemt', 'extraToml'],
+          'telemtExtraToml',
+          <Input.TextArea
+            autoSize={{ minRows: 3, maxRows: 12 }}
+            placeholder={'[server]\nclient_mss = "tspu"'}
+            spellCheck={false}
+            style={{ fontFamily: 'monospace' }}
+          />,
+          'telemtExtraTomlHint',
+        ),
+      ],
+    },
+  ];
+
   return (
     <>
+      <FormField
+        name={['settings', 'backend']}
+        label={f('mtprotoBackend')}
+        tooltip={f('mtprotoBackendHint')}
+      >
+        <Select
+          placeholder="mtg-multi"
+          options={[
+            { value: 'mtg', label: 'mtg-multi' },
+            { value: 'telemt', label: 'telemt' },
+          ]}
+        />
+      </FormField>
       <FormField
         name={['settings', 'fakeTlsDomain']}
         label={t('pages.inbounds.form.fakeTlsDomain')}
@@ -388,13 +439,15 @@ export default function MtprotoFields() {
       >
         <InputNumber min={0} max={65535} placeholder="443" style={{ width: '100%' }} />
       </FormField>
-      <FormField
-        name={['settings', 'domainFronting', 'proxyProtocol']}
-        label={t('pages.inbounds.form.mtgDomainFrontingProxyProtocol')}
-        valueProp="checked"
-      >
-        <Switch />
-      </FormField>
+      {!isTelemt && (
+        <FormField
+          name={['settings', 'domainFronting', 'proxyProtocol']}
+          label={t('pages.inbounds.form.mtgDomainFrontingProxyProtocol')}
+          valueProp="checked"
+        >
+          <Switch />
+        </FormField>
+      )}
       <FormField
         name={['settings', 'proxyProtocolListener']}
         label={t('pages.inbounds.form.mtgProxyProtocolListener')}
@@ -414,20 +467,24 @@ export default function MtprotoFields() {
           ]}
         />
       </FormField>
-      <FormField
-        name={['settings', 'debug']}
-        label={t('pages.inbounds.form.mtgDebug')}
-        valueProp="checked"
-      >
-        <Switch />
-      </FormField>
-      <FormField
-        name={['settings', 'throttleMaxConnections']}
-        label={t('pages.inbounds.form.mtgThrottleMaxConnections')}
-        tooltip={t('pages.inbounds.form.mtgThrottleMaxConnectionsHint')}
-      >
-        <InputNumber min={0} placeholder="0" style={{ width: '100%' }} />
-      </FormField>
+      {!isTelemt && (
+        <>
+          <FormField
+            name={['settings', 'debug']}
+            label={t('pages.inbounds.form.mtgDebug')}
+            valueProp="checked"
+          >
+            <Switch />
+          </FormField>
+          <FormField
+            name={['settings', 'throttleMaxConnections']}
+            label={t('pages.inbounds.form.mtgThrottleMaxConnections')}
+            tooltip={t('pages.inbounds.form.mtgThrottleMaxConnectionsHint')}
+          >
+            <InputNumber min={0} placeholder="0" style={{ width: '100%' }} />
+          </FormField>
+        </>
+      )}
       <FormField
         name={['settings', 'routeThroughXray']}
         label={t('pages.inbounds.form.mtgRouteThroughXray')}
@@ -467,54 +524,60 @@ export default function MtprotoFields() {
           style={{ marginBottom: 16 }}
         />
       )}
-      <FormField
-        name={['settings', 'publicIpv4']}
-        label={t('pages.inbounds.form.mtgPublicIpv4')}
-        tooltip={t('pages.inbounds.form.mtgPublicIpHint')}
-      >
-        <Input allowClear placeholder="1.2.3.4" />
-      </FormField>
-      <FormField
-        name={['settings', 'publicIpv6']}
-        label={t('pages.inbounds.form.mtgPublicIpv6')}
-        tooltip={t('pages.inbounds.form.mtgPublicIpHint')}
-      >
-        <Input allowClear placeholder="2001:db8::1" />
-      </FormField>
-      <FormField
-        name={['settings', 'mtgSecuredWebBuild']}
-        label={t('pages.inbounds.form.mtgSecuredWebBuild')}
-        tooltip={t('pages.inbounds.form.mtgSecuredWebBuildHint')}
-        valueProp="checked"
-      >
-        <Switch />
-      </FormField>
-      <FormField
-        name={['settings', 'secured']}
-        label={t('pages.inbounds.form.mtgSecured')}
-        tooltip={t('pages.inbounds.form.mtgSecuredHint')}
-        valueProp="checked"
-      >
-        <Switch />
-      </FormField>
-      <FormField
-        name={['settings', 'dcPool', 'enabled']}
-        label={t('pages.inbounds.form.mtgDcPool')}
-        tooltip={t('pages.inbounds.form.mtgDcPoolHint')}
-        valueProp="checked"
-      >
-        <Switch />
-      </FormField>
-      {dcPoolEnabled && (
-        <FormField
-          name={['settings', 'dcPool', 'size']}
-          label={t('pages.inbounds.form.mtgDcPoolSize')}
-          tooltip={t('pages.inbounds.form.mtgDcPoolSizeHint')}
-        >
-          <InputNumber min={1} max={64} placeholder="2" style={{ width: '100%' }} />
-        </FormField>
+      {isTelemt ? (
+        <Collapse size="small" items={telemtSections} />
+      ) : (
+        <>
+          <FormField
+            name={['settings', 'publicIpv4']}
+            label={t('pages.inbounds.form.mtgPublicIpv4')}
+            tooltip={t('pages.inbounds.form.mtgPublicIpHint')}
+          >
+            <Input allowClear placeholder="1.2.3.4" />
+          </FormField>
+          <FormField
+            name={['settings', 'publicIpv6']}
+            label={t('pages.inbounds.form.mtgPublicIpv6')}
+            tooltip={t('pages.inbounds.form.mtgPublicIpHint')}
+          >
+            <Input allowClear placeholder="2001:db8::1" />
+          </FormField>
+          <FormField
+            name={['settings', 'mtgSecuredWebBuild']}
+            label={t('pages.inbounds.form.mtgSecuredWebBuild')}
+            tooltip={t('pages.inbounds.form.mtgSecuredWebBuildHint')}
+            valueProp="checked"
+          >
+            <Switch />
+          </FormField>
+          <FormField
+            name={['settings', 'secured']}
+            label={t('pages.inbounds.form.mtgSecured')}
+            tooltip={t('pages.inbounds.form.mtgSecuredHint')}
+            valueProp="checked"
+          >
+            <Switch />
+          </FormField>
+          <FormField
+            name={['settings', 'dcPool', 'enabled']}
+            label={t('pages.inbounds.form.mtgDcPool')}
+            tooltip={t('pages.inbounds.form.mtgDcPoolHint')}
+            valueProp="checked"
+          >
+            <Switch />
+          </FormField>
+          {dcPoolEnabled && (
+            <FormField
+              name={['settings', 'dcPool', 'size']}
+              label={t('pages.inbounds.form.mtgDcPoolSize')}
+              tooltip={t('pages.inbounds.form.mtgDcPoolSizeHint')}
+            >
+              <InputNumber min={1} max={64} placeholder="2" style={{ width: '100%' }} />
+            </FormField>
+          )}
+          <Collapse size="small" items={advanced} />
+        </>
       )}
-      <Collapse size="small" items={advanced} />
     </>
   );
 }

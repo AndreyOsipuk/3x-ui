@@ -419,3 +419,68 @@ describe('mtproto advanced settings form', () => {
     expect(labels).not.toContain('DCs to keep warm');
   });
 });
+
+describe('mtproto telemt backend', () => {
+  it('keeps the telemt options and drops cleared ones', () => {
+    const parsed = parse({
+      backend: 'telemt',
+      telemt: { maxTcpConnsPerUser: 8, extraToml: '[server]\nclient_mss = "tspu"\n' },
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.backend).toBe('telemt');
+    expect(parsed.data?.telemt).toEqual({
+      maxTcpConnsPerUser: 8,
+      extraToml: '[server]\nclient_mss = "tspu"\n',
+    });
+    const cleared = parse({
+      backend: 'telemt',
+      telemt: { maxTcpConnsPerUser: null, extraToml: '' },
+    });
+    expect(cleared.data?.telemt).toEqual({});
+  });
+
+  it.each([
+    ['an unknown backend', { backend: 'mtproxy' }],
+    ['a connection cap above 65535', { telemt: { maxTcpConnsPerUser: 65536 } }],
+  ])('rejects %s', (_name, settings) => {
+    expect(parse(settings).success).toBe(false);
+  });
+
+  it('shows the telemt settings instead of the mtg-only ones', () => {
+    renderFields({ backend: 'telemt' });
+    expect(screen.getByText('telemt settings')).toBeTruthy();
+    expect(screen.queryByText('Advanced: WEB mode')).toBeNull();
+    const labels = fieldLabels();
+    expect(labels).toContain('Backend');
+    expect(labels).toContain('FakeTLS domain (SNI)');
+    expect(labels).not.toContain('mtg-multi serves Secured and WEB');
+    openPanel('telemt settings');
+    expect(fieldLabels()).toContain('TCP connections per client');
+  });
+
+  it('clears secured and WEB, which telemt cannot serve', () => {
+    let values: Record<string, unknown> = {};
+    function Probe() {
+      const methods = useForm({
+        defaultValues: { settings: { backend: 'telemt', secured: true, web: WEB_ON, clients: [] } },
+      });
+      return (
+        <FormProvider {...methods}>
+          <Form>
+            <MtprotoFields />
+          </Form>
+          <button type="button" onClick={() => (values = methods.getValues('settings'))}>
+            read
+          </button>
+        </FormProvider>
+      );
+    }
+    vi.spyOn(HttpUtil, 'post').mockResolvedValue(
+      new Msg(true, '', JSON.stringify({ xraySetting: { outbounds: [] } })),
+    );
+    renderWithProviders(<Probe />);
+    fireEvent.click(screen.getByText('read'));
+    expect(values.secured).toBe(false);
+    expect(values.web).toEqual({});
+  });
+});
