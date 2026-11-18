@@ -1,6 +1,6 @@
 module github.com/mhsanaei/3x-ui/v3
 
-go 1.27.1
+go 1.27.4
 
 require (
 	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828
@@ -16,7 +16,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/joho/godotenv v1.5.1
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.2
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/mymmrac/telego v1.12.1
 	github.com/nicksnyder/go-i18n/v2 v2.6.1
@@ -31,7 +31,7 @@ require (
 	github.com/xtls/xray-core v1.260327.1-0.20260930074004-b26a91de4f32
 	go.uber.org/atomic v1.12.0
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/text v0.42.0
 	google.golang.org/grpc v1.86.0-dev
@@ -46,7 +46,7 @@ require (
 
 require (
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
-	github.com/andybalholm/brotli v1.2.6 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.4 // indirect
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
