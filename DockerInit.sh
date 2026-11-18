@@ -50,6 +50,25 @@ tar -xzf "${MTG_PKG}.tar.gz"
 mv "${MTG_PKG}/mtg-multi" "mtg-linux-${FNAME}"
 rm -rf "${MTG_PKG}" "${MTG_PKG}.tar.gz"
 chmod +x "mtg-linux-${FNAME}"
+# telemt (the second MTProto backend) publishes static musl builds for amd64
+# and arm64 only; elsewhere the panel refuses telemt inbounds on save.
+case $FNAME in
+    amd64) TELEMT_ARCH="x86_64" ;;
+    arm64) TELEMT_ARCH="aarch64" ;;
+    *) TELEMT_ARCH="" ;;
+esac
+if [ -n "$TELEMT_ARCH" ]; then
+    TELEMT_VER=$(curl -sfL "https://api.github.com/repos/telemt/telemt/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -z "$TELEMT_VER" ]; then
+        echo "DockerInit: could not resolve the latest telemt release tag" >&2
+        exit 1
+    fi
+    curl -sfLR -o telemt.tar.gz "https://github.com/telemt/telemt/releases/download/${TELEMT_VER}/telemt-${TELEMT_ARCH}-linux-musl.tar.gz"
+    tar -xzf telemt.tar.gz telemt
+    mv telemt "telemt-linux-${FNAME}"
+    rm -f telemt.tar.gz
+    chmod +x "telemt-linux-${FNAME}"
+fi
 curl -sfLRO https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
 curl -sfLRO https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
 curl -sfLRo geoip_IR.dat https://github.com/chocolate4u/Iran-v2ray-rules/releases/latest/download/geoip.dat
