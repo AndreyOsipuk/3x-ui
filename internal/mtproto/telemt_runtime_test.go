@@ -179,6 +179,8 @@ func TestTelemtRejectedReloadRollsBack(t *testing.T) {
 	served := readFile(t, cur.telemt.usersPath())
 
 	state.set(verdictRejected)
+	// Pending SIGHUPs coalesce, so the rollback one is sent only after the first arrived.
+	state.beforeReject = func() { waitLines(t, hupFile, 1) }
 	err := mgr.Ensure(telemtInst(telemtAlice, telemtBob))
 	if err == nil || !strings.Contains(err.Error(), "references unknown access user") {
 		t.Fatalf("a rejected reload must surface telemt's reason, got %v", err)
