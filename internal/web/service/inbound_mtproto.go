@@ -166,6 +166,15 @@ func validateMtprotoSettings(inbound *model.Inbound) error {
 	if err := mtproto.ValidateSettings(inbound.Settings); err != nil {
 		return common.NewErrorf("%s", err)
 	}
+	if mtproto.SettingsBackend(inbound.Settings) != mtproto.BackendTelemt {
+		return nil
+	}
+	if !mtproto.ValidTelemtListen(inbound.Listen) {
+		return common.NewErrorf("mtproto telemt listens on IP addresses only, not %q", inbound.Listen)
+	}
+	if inbound.NodeID == nil && !mtproto.TelemtAvailable() {
+		return common.NewErrorf("mtproto telemt backend needs %s in the bin folder", mtproto.GetTelemtBinaryName())
+	}
 	return nil
 }
 
