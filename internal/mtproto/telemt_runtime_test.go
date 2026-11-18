@@ -392,3 +392,64 @@ telemt_connections_total 5
 		}
 	}
 }
+
+// TestTelemtFirstScrapeCountsFromZero: telemt creates a user's counters at its first
+// connection (and again after 24h idle), so their first sighting is all new traffic.
+func TestTelemtFirstScrapeCountsFromZero(t *testing.T) {
+	pidFile, _ := installFakeTelemt(t)
+	stubTelemtState(t, verdictAccepted)
+	mgr := testManager(t)
+	if err := mgr.Ensure(telemtInst(telemtAlice)); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitLines(t, pidFile, 1)
+
+	body := "telemt_user_octets_from_client_total{user=\"alice\"} 1500\ntelemt_user_octets_to_client_total{user=\"alice\"} 98000\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	mgr.procs[7].telemt.metricsPort = serverPort(t, srv)
+
+	got, _ := mgr.CollectTraffic()
+	want := []Traffic{{Tag: "inbound-7", Email: "alice", Up: 1500, Down: 98000}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("first scrape = %+v, want %+v", got, want)
+	}
+	body = "telemt_user_octets_from_client_total{user=\"alice\"} 1600\ntelemt_user_octets_to_client_total{user=\"alice\"} 98000\n"
+	got, _ = mgr.CollectTraffic()
+	if len(got) != 1 || got[0].Up != 100 || got[0].Down != 0 {
+		t.Fatalf("second scrape must count the delta only, got %+v", got)
+	}
+}
+
+// TestTelemtRefusedStartRetriedLater: telemt also exits on transient trouble (a
+// port still held), so a refused config is retried after a pause, not never.
+func TestTelemtRefusedStartRetriedLater(t *testing.T) {
+	pidFile, _ := installFakeTelemt(t)
+	state := stubTelemtState(t, verdictRejected)
+	state.beforeReject = func() { waitLines(t, pidFile, 1) }
+	prev := telemtRetryAfter
+	telemtRetryAfter = 300 * time.Millisecond
+	t.Cleanup(func() { telemtRetryAfter = prev })
+	mgr := testManager(t)
+
+	if err := mgr.Ensure(telemtInst(telemtAlice)); !errors.Is(err, errTelemtRefused) {
+		t.Fatalf("first start: %v", err)
+	}
+	if err := mgr.Ensure(telemtInst(telemtAlice)); err != nil {
+		t.Fatalf("a refused config must not be retried at once: %v", err)
+	}
+	if _, ok := mgr.procs[7]; ok {
+		t.Fatal("nothing may run right after the refusal")
+	}
+
+	time.Sleep(telemtRetryAfter)
+	state.set(verdictAccepted)
+	if err := mgr.Ensure(telemtInst(telemtAlice)); err != nil {
+		t.Fatalf("retry after the pause: %v", err)
+	}
+	if cur, ok := mgr.procs[7]; !ok || !cur.proc.IsRunning() {
+		t.Fatal("the inbound must be served once the pause is over")
+	}
+}
