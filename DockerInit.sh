@@ -52,18 +52,17 @@ rm -rf "${MTG_PKG}" "${MTG_PKG}.tar.gz"
 chmod +x "mtg-linux-${FNAME}"
 # telemt (the second MTProto backend) publishes static musl builds for amd64
 # and arm64 only; elsewhere the panel refuses telemt inbounds on save.
+# Pinned with checksums: it is a third-party binary, and the panel relies on its
+# config keys, /v1/config/state and metric names.
+TELEMT_VER="3.5.17"
 case $FNAME in
-    amd64) TELEMT_ARCH="x86_64" ;;
-    arm64) TELEMT_ARCH="aarch64" ;;
+    amd64) TELEMT_ARCH="x86_64"; TELEMT_SHA256="f1591635849e0aad31f147692b21726da2f49499aae3ece79f8760c92925133a" ;;
+    arm64) TELEMT_ARCH="aarch64"; TELEMT_SHA256="c80b0159b41cf410b2a87cf62676d67a16a537bd7207602b60dd9ce56e14d1f6" ;;
     *) TELEMT_ARCH="" ;;
 esac
 if [ -n "$TELEMT_ARCH" ]; then
-    TELEMT_VER=$(curl -sfL "https://api.github.com/repos/telemt/telemt/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
-    if [ -z "$TELEMT_VER" ]; then
-        echo "DockerInit: could not resolve the latest telemt release tag" >&2
-        exit 1
-    fi
     curl -sfLR -o telemt.tar.gz "https://github.com/telemt/telemt/releases/download/${TELEMT_VER}/telemt-${TELEMT_ARCH}-linux-musl.tar.gz"
+    echo "${TELEMT_SHA256}  telemt.tar.gz" | sha256sum -c -
     tar -xzf telemt.tar.gz telemt
     mv telemt "telemt-linux-${FNAME}"
     rm -f telemt.tar.gz
