@@ -327,14 +327,18 @@ func WebEndpoint(settings string) (host, secretMode string, ok bool) {
 // so a value mtg would reject never reaches the generated config.
 func ValidateSettings(settings string) error {
 	var raw struct {
-		RouteThroughXray bool `json:"routeThroughXray"`
-		Secured          bool `json:"secured"`
+		RouteThroughXray bool   `json:"routeThroughXray"`
+		Secured          bool   `json:"secured"`
+		Backend          string `json:"backend"`
 		DCPool           *struct {
 			Size int `json:"size"`
 		} `json:"dcPool"`
 	}
 	if err := json.Unmarshal([]byte(settings), &raw); err != nil {
 		return nil // malformed JSON is rejected by the generic settings checks
+	}
+	if ParseBackend(raw.Backend) == BackendTelemt {
+		return validateTelemtSettings(settings, raw.RouteThroughXray)
 	}
 	if raw.DCPool != nil && (raw.DCPool.Size < 0 || raw.DCPool.Size > DCPoolMaxSize) {
 		return fmt.Errorf("mtproto dcPool.size must be between 1 and %d", DCPoolMaxSize)

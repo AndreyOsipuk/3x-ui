@@ -79,6 +79,11 @@ type Instance struct {
 	// Options carries the remaining mtg knobs (timeouts, defense, stats, WEB
 	// mode, extra TOML); every unset one is left out of the config.
 	Options Options
+
+	// Backend picks the sidecar; telemt reads FakeTLSDomain and Telemt, not Options.
+	Backend       Backend
+	FakeTLSDomain string
+	Telemt        TelemtOptions
 }
 
 // DCPoolMaxSize caps the warm connections per DC: each one is an idle
@@ -148,6 +153,7 @@ type clientCounters struct {
 }
 
 type managed struct {
+	backend      Backend
 	proc         *Process
 	tag          string
 	structuralFP string
@@ -155,6 +161,7 @@ type managed struct {
 	apiPort      int
 	apiToken     string
 	last         map[string]clientCounters
+	telemt       *telemtState
 }
 
 // Manager owns the set of running mtg processes keyed by inbound id.
@@ -164,6 +171,10 @@ type Manager struct {
 	// swept records that the one-time startup cleanup of orphaned mtg
 	// processes (survivors of a previous x-ui run) has already run.
 	swept bool
+	// failedStart holds, per inbound, the telemt config telemt refused to start
+	// with, so the reconcile tick does not restart it in a loop.
+	failedStart   map[int]string
+	newTelemtProc func(configPath, workDir, label string) *Process
 }
 
 var (
@@ -171,10 +182,14 @@ var (
 	manager     *Manager
 )
 
+func newManager() *Manager {
+	return &Manager{procs: map[int]*managed{}, failedStart: map[int]string{}, newTelemtProc: newTelemtProcess}
+}
+
 // GetManager returns the process-wide mtg manager singleton.
 func GetManager() *Manager {
 	managerOnce.Do(func() {
-		manager = &Manager{procs: map[int]*managed{}}
+		manager = newManager()
 	})
 	return manager
 }
@@ -208,7 +223,10 @@ func InstanceFromInbound(ib *model.Inbound) (Instance, bool) {
 			Enabled bool `json:"enabled"`
 			Size    int  `json:"size"`
 		} `json:"dcPool"`
-		Clients []struct {
+		Backend       string        `json:"backend"`
+		FakeTLSDomain string        `json:"fakeTlsDomain"`
+		Telemt        TelemtOptions `json:"telemt"`
+		Clients       []struct {
 			Email      string `json:"email"`
 			Secret     string `json:"secret"`
 			AdTag      string `json:"adTag"`
@@ -259,6 +277,9 @@ func InstanceFromInbound(ib *model.Inbound) (Instance, bool) {
 		DCPoolEnabled:          parsed.DCPool.Enabled,
 		DCPoolSize:             usableDCPoolSize(parsed.DCPool.Enabled, parsed.DCPool.Size),
 		Options:                opts,
+		Backend:                ParseBackend(parsed.Backend),
+		FakeTLSDomain:          strings.TrimSpace(parsed.FakeTLSDomain),
+		Telemt:                 usableTelemtOptions(parsed.Telemt),
 	}, true
 }
 
@@ -344,6 +365,9 @@ func (m *Manager) sweepOrphansLocked() {
 	if n := killStrayMtgProcesses(GetBinaryPath()); n > 0 {
 		logger.Warningf("mtproto: terminated %d orphaned mtg process(es) from a previous run", n)
 	}
+	if n := killStrayMtgProcesses(GetTelemtBinaryPath()); n > 0 {
+		logger.Warningf("mtproto: terminated %d orphaned telemt process(es) from a previous run", n)
+	}
 }
 
 // ensureAction is what ensureLocked must do to move a running mtg process to a
@@ -372,8 +396,15 @@ func ensureActionFor(running bool, curStructFP, curSecretsFP, newStructFP, newSe
 }
 
 func (m *Manager) ensureLocked(inst Instance) error {
+	if inst.Backend == BackendTelemt {
+		return m.ensureTelemtLocked(inst)
+	}
+	delete(m.failedStart, inst.Id)
 	structFP := inst.structuralFingerprint()
 	secFP := inst.secretsFingerprint()
+	if cur, ok := m.procs[inst.Id]; ok && cur.backend == BackendTelemt {
+		m.stopLocked(inst.Id, cur)
+	}
 	if cur, ok := m.procs[inst.Id]; ok {
 		switch ensureActionFor(cur.proc.IsRunning(), cur.structuralFP, cur.secretsFP, structFP, secFP) {
 		case ensureNoop:
@@ -413,6 +444,7 @@ func (m *Manager) ensureLocked(inst Instance) error {
 		return err
 	}
 	m.procs[inst.Id] = &managed{
+		backend:      BackendMtg,
 		proc:         proc,
 		tag:          inst.Tag,
 		structuralFP: structFP,
@@ -429,12 +461,22 @@ func (m *Manager) ensureLocked(inst Instance) error {
 func (m *Manager) Remove(id int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	delete(m.failedStart, id)
 	if cur, ok := m.procs[id]; ok {
-		_ = cur.proc.Stop()
-		delete(m.procs, id)
-		_ = os.Remove(configPathForID(id))
-		logger.Infof("mtproto: stopped mtg for inbound %d", id)
+		m.stopLocked(id, cur)
+		logger.Infof("mtproto: stopped the %s sidecar for inbound %d", cur.backend, id)
 	}
+}
+
+// stopLocked stops one sidecar and removes the files the panel generated for it.
+func (m *Manager) stopLocked(id int, cur *managed) {
+	_ = cur.proc.Stop()
+	delete(m.procs, id)
+	if cur.telemt != nil {
+		_ = os.RemoveAll(cur.telemt.dir)
+		return
+	}
+	_ = os.Remove(configPathForID(id))
 }
 
 // Reconcile drives the running set toward the desired instances: it stops
@@ -450,9 +492,12 @@ func (m *Manager) Reconcile(desired []Instance) {
 	}
 	for id, cur := range m.procs {
 		if _, ok := want[id]; !ok {
-			_ = cur.proc.Stop()
-			delete(m.procs, id)
-			_ = os.Remove(configPathForID(id))
+			m.stopLocked(id, cur)
+		}
+	}
+	for id := range m.failedStart {
+		if _, ok := want[id]; !ok {
+			delete(m.failedStart, id)
 		}
 	}
 	for _, inst := range desired {
@@ -467,9 +512,7 @@ func (m *Manager) StopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, cur := range m.procs {
-		_ = cur.proc.Stop()
-		_ = os.Remove(configPathForID(id))
-		delete(m.procs, id)
+		m.stopLocked(id, cur)
 	}
 }
 
@@ -478,11 +521,12 @@ func (m *Manager) StopAll() {
 // with at least one live connection.
 func (m *Manager) CollectTraffic() ([]Traffic, []string) {
 	type snap struct {
-		id       int
-		apiPort  int
-		apiToken string
-		tag      string
-		last     map[string]clientCounters
+		id          int
+		metricsPort int
+		apiPort     int
+		apiToken    string
+		tag         string
+		last        map[string]clientCounters
 	}
 	m.mu.Lock()
 	snaps := make([]snap, 0, len(m.procs))
@@ -492,14 +536,24 @@ func (m *Manager) CollectTraffic() ([]Traffic, []string) {
 		}
 		lastCopy := make(map[string]clientCounters, len(cur.last))
 		maps.Copy(lastCopy, cur.last)
-		snaps = append(snaps, snap{id: id, apiPort: cur.apiPort, apiToken: cur.apiToken, tag: cur.tag, last: lastCopy})
+		s := snap{id: id, apiPort: cur.apiPort, apiToken: cur.apiToken, tag: cur.tag, last: lastCopy}
+		if cur.telemt != nil {
+			s.metricsPort = cur.telemt.metricsPort
+		}
+		snaps = append(snaps, s)
 	}
 	m.mu.Unlock()
 
 	var out []Traffic
 	var online []string
 	for _, s := range snaps {
-		users, ok := scrapeStats(s.apiPort, s.apiToken)
+		var users map[string]statsUser
+		var ok bool
+		if s.metricsPort > 0 {
+			users, ok = scrapeTelemtMetrics(s.metricsPort)
+		} else {
+			users, ok = scrapeStats(s.apiPort, s.apiToken)
+		}
 		if !ok {
 			continue
 		}
@@ -559,7 +613,8 @@ func (m *Manager) ResetQuota(email string) {
 	m.mu.Lock()
 	targets := make([]target, 0, len(m.procs))
 	for _, cur := range m.procs {
-		if cur.proc != nil && cur.proc.IsRunning() {
+		// telemt has no quota of its own: the panel drops a depleted client instead.
+		if cur.telemt == nil && cur.proc != nil && cur.proc.IsRunning() {
 			targets = append(targets, target{cur.apiPort, cur.apiToken})
 		}
 	}
