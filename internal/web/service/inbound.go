@@ -1137,6 +1137,9 @@ func (s *InboundService) normalizeMtprotoXrayPort(inbound *model.Inbound, oldSet
 // Returns the created inbound, whether Xray needs restart, and any error.
 func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
 	inbound.Id = 0
+	if inbound.NodeID == nil && haEnabled() {
+		return inbound, false, errHALocalInbound
+	}
 	if err := normalizeTuicSettings(inbound); err != nil {
 		return inbound, false, err
 	}

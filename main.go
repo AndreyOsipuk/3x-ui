@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 	_ "unsafe"
 
 	"github.com/mhsanaei/3x-ui/v3/internal/config"
@@ -108,9 +109,24 @@ func runWebServer() {
 		log.Fatalf("Error initializing node-token encryption: %v", err)
 	}
 
-	err := database.InitDB(config.GetDBPath())
+	haNode, err := startHA()
+	if err != nil {
+		log.Fatalf("Error starting HA mode: %v", err)
+	}
+	if haNode != nil {
+		if err := haNode.waitForMaster(); err != nil {
+			log.Fatalf("HA standby: %v", err)
+		}
+	}
+
+	err = database.InitDB(config.GetDBPath())
 	if err != nil {
 		log.Fatalf("Error initializing database: %v", err)
+	}
+	if haNode != nil {
+		if err := service.PrepareHAMaster(); err != nil {
+			log.Fatalf("HA master: %v", err)
+		}
 	}
 
 	server := web.NewServer()
@@ -159,8 +175,18 @@ func runWebServer() {
 			go monitor.Run(monitorCtx)
 		}
 	}
+	demoted := false
 	for {
-		sig := <-sigCh
+		var sig os.Signal
+		select {
+		case sig = <-sigCh:
+		case <-haNode.demoted():
+			logger.Warning("HA: this node lost master, stopping the panel to restart as standby")
+			sig = syscall.SIGTERM
+			// A hung shutdown must not keep a non-master process alive.
+			time.AfterFunc(20*time.Second, func() { os.Exit(exitDemoted) })
+			demoted = true
+		}
 
 		switch sig {
 		case syscall.SIGHUP:
@@ -212,6 +238,9 @@ func runWebServer() {
 			}
 			_ = subServer.Stop()
 			log.Println("Shutting down servers.")
+			if demoted {
+				os.Exit(exitDemoted)
+			}
 			return
 		}
 	}
