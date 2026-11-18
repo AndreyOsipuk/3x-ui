@@ -3,6 +3,7 @@ package mtproto
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -182,6 +183,16 @@ func telemtUsesMiddleProxy(inst Instance) bool {
 // renderTelemtMain renders telemt.toml: everything except the clients, which
 // come last through the include so a users-only change never touches this file.
 func renderTelemtMain(inst Instance, rt telemtRuntime) string {
+	main, warnings := composeTelemtMain(inst, rt)
+	for _, w := range warnings {
+		logger.Warningf("mtproto: inbound %d %s", inst.Id, w)
+	}
+	return main
+}
+
+// composeTelemtMain renders telemt.toml and returns what it had to leave out,
+// so the fingerprint taken every reconcile tick does not log it each time.
+func composeTelemtMain(inst Instance, rt telemtRuntime) (string, []string) {
 	users := telemtUsers(inst)
 	primary, extraDomains := telemtDomains(inst, users)
 	preferIPv6 := inst.PreferIP == "prefer-ipv6" || inst.PreferIP == "only-ipv6"
@@ -238,18 +249,32 @@ func renderTelemtMain(inst Instance, rt telemtRuntime) string {
 	}
 
 	head := b.String()
-	if merged, err := mergeTelemtExtraTOML(head, inst, users); err != nil {
-		logger.Warningf("mtproto: ignoring the telemt extra TOML of inbound %d: %v", inst.Id, err)
+	merged, warnings, err := mergeTelemtExtraTOML(head, inst, users)
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("ignores its telemt extra TOML: %v", err))
 	} else {
 		head = merged
 	}
-	return head + "\ninclude = " + tomlString(telemtUsersFile) + "\n"
+	return head + "\ninclude = " + tomlString(telemtUsersFile) + "\n", warnings
 }
 
 // telemtMainFingerprint is the rendered telemt.toml with placeholder runtime
 // ports, so it moves exactly when a change needs a telemt restart.
 func telemtMainFingerprint(inst Instance) string {
-	return renderTelemtMain(inst, telemtRuntime{})
+	main, _ := composeTelemtMain(inst, telemtRuntime{})
+	return main
+}
+
+// hasIncludeLine mirrors telemt's include preprocessor, which splices in any line
+// that trims to `include =`, inside a table or a multi-line string alike.
+func hasIncludeLine(text string) bool {
+	for line := range strings.Lines(text) {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "include")
+		if ok && strings.HasPrefix(strings.TrimSpace(rest), "=") {
+			return true
+		}
+	}
+	return false
 }
 
 // tomlString renders a TOML basic string; unlike strconv.Quote it never emits
@@ -376,14 +401,17 @@ func forEachWebProfile(doc map[string]any, keep func(map[string]any) bool) {
 
 // mergeTelemtExtraTOML merges the extra block under the generated config, panel keys winning.
 // It drops WEB profiles of unserved users: telemt rejects the config ("unknown access user").
-func mergeTelemtExtraTOML(head string, inst Instance, users []telemtUser) (string, error) {
+func mergeTelemtExtraTOML(head string, inst Instance, users []telemtUser) (string, []string, error) {
 	extra := inst.Telemt.ExtraTOML
 	if strings.TrimSpace(extra) == "" {
-		return head, nil
+		return head, nil, nil
+	}
+	if hasIncludeLine(extra) {
+		return head, nil, errors.New("it has an include line")
 	}
 	add := map[string]any{}
 	if err := toml.Unmarshal([]byte(extra), &add); err != nil {
-		return head, err
+		return head, nil, err
 	}
 	for _, p := range telemtForbiddenPaths {
 		deletePath(add, p)
@@ -402,27 +430,28 @@ func mergeTelemtExtraTOML(head string, inst Instance, users []telemtUser) (strin
 	for _, u := range users {
 		served[u.name] = struct{}{}
 	}
+	var warnings []string
 	forEachWebProfile(add, func(p map[string]any) bool {
 		u, _ := p["user"].(string)
 		if _, ok := served[u]; ok {
 			return true
 		}
-		logger.Warningf("mtproto: inbound %d drops the telemt WEB profile of %q: the client is not served", inst.Id, u)
+		warnings = append(warnings, fmt.Sprintf("drops the telemt WEB profile of %q: the client is not served", u))
 		return false
 	})
 	if len(add) == 0 {
-		return head, nil
+		return head, warnings, nil
 	}
 	base := map[string]any{}
 	if err := toml.Unmarshal([]byte(head), &base); err != nil {
-		return head, err
+		return head, warnings, err
 	}
 	mergeUnder(base, add)
 	out, err := toml.Marshal(base)
 	if err != nil {
-		return head, err
+		return head, warnings, err
 	}
-	return string(out), nil
+	return string(out), warnings, nil
 }
 
 // validateTelemtSettings checks the telemt side of mtproto settings on save:
@@ -453,6 +482,9 @@ func validateTelemtSettings(settings string, routed bool) error {
 	}
 	if len(extra) > MaxExtraTOMLBytes {
 		return fmt.Errorf("mtproto telemt.extraToml must be at most %d bytes", MaxExtraTOMLBytes)
+	}
+	if hasIncludeLine(extra) {
+		return fmt.Errorf("mtproto telemt.extraToml may not set %q: telemt reads any include line, nested ones too", "include")
 	}
 	doc := map[string]any{}
 	if err := toml.Unmarshal([]byte(extra), &doc); err != nil {

@@ -115,10 +115,14 @@ func fetchConfigState(port int, token string) (configVerdict, string) {
 }
 
 var (
-	telemtPollInterval  = 200 * time.Millisecond
-	telemtReloadTimeout = 10 * time.Second
-	telemtStartTimeout  = 15 * time.Second
+	telemtPollInterval = 200 * time.Millisecond
+	// Both waits hold the manager lock: a published reload takes milliseconds, and
+	// an unconfirmed one is retried on the next reconcile tick anyway.
+	telemtReloadTimeout = 3 * time.Second
+	telemtStartTimeout  = 10 * time.Second
 	telemtConfigState   = fetchConfigState
+	// telemtRetryAfter is how long a config telemt refused to start with rests.
+	telemtRetryAfter = time.Minute
 )
 
 // waitTelemtConfig polls the config state until a final verdict, the timeout,
@@ -154,8 +158,14 @@ func writeFileAtomic(path, content string) error {
 	return os.Rename(tmp, path)
 }
 
-// errTelemtRefused marks a config telemt would not start with; the manager does
-// not retry it until the desired config changes.
+// failedStart is a config telemt refused to start with, and when.
+type failedStart struct {
+	config string
+	at     time.Time
+}
+
+// errTelemtRefused marks a config telemt would not start with; the manager rests
+// it for telemtRetryAfter unless the desired config changes.
 var errTelemtRefused = errors.New("telemt refused the config")
 
 // telemtState is the telemt-specific part of a managed sidecar.
@@ -190,7 +200,7 @@ func (m *Manager) ensureTelemtLocked(inst Instance) error {
 		}
 		return m.reloadTelemtUsersLocked(cur, inst.Id, usersText)
 	}
-	if m.failedStart[inst.Id] == mainFP+usersText {
+	if f, ok := m.failedStart[inst.Id]; ok && f.config == mainFP+usersText && time.Since(f.at) < telemtRetryAfter {
 		return nil
 	}
 	var prev *managed
@@ -207,7 +217,7 @@ func (m *Manager) ensureTelemtLocked(inst Instance) error {
 		return nil
 	}
 	if errors.Is(err, errTelemtRefused) {
-		m.failedStart[inst.Id] = mainFP + usersText
+		m.failedStart[inst.Id] = failedStart{config: mainFP + usersText, at: time.Now()}
 	}
 	if prev != nil && prev.telemt.mainText != "" {
 		if rbErr := m.restartPreviousTelemtLocked(inst.Id, prev); rbErr != nil {

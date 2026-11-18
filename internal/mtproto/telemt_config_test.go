@@ -2,12 +2,15 @@ package mtproto
 
 import (
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
+	"github.com/mhsanaei/3x-ui/v3/internal/logger"
 )
 
 // eeSecret builds a FakeTLS client secret the way the panel stores it.
@@ -202,7 +205,6 @@ func TestTelemtExtraTOMLMerge(t *testing.T) {
 	inst.RouteThroughXray = true
 	inst.XrayRoutePort = 50001
 	inst.Telemt.ExtraTOML = `
-include = "/etc/evil.toml"
 [general.modes]
 tls = false
 [server]
@@ -326,5 +328,52 @@ func TestInstanceFromInboundTelemt(t *testing.T) {
 	ib.Settings = strings.Replace(ib.Settings, `"backend":"TeLeMt",`, "", 1)
 	if inst, _ := InstanceFromInbound(ib); inst.Backend != BackendMtg {
 		t.Fatalf("settings without a backend must stay on mtg, got %q", inst.Backend)
+	}
+}
+
+// TestTelemtNestedIncludeRefused: telemt splices in any line starting with
+// `include =`, inside a table or a multi-line string too, before it parses TOML.
+func TestTelemtNestedIncludeRefused(t *testing.T) {
+	clients := `"clients":[{"email":"alice","secret":"` + eeSecret(keyAlice, "example.com") + `","enable":true}]`
+	for _, extra := range []string{
+		`[censorship]\ninclude = \"/etc/shadow\"\n`,
+		`[general]\nnote = \"\"\"\n  include = \"/etc/shadow\"\n\"\"\"\n`,
+	} {
+		err := ValidateSettings(`{"backend":"telemt","telemt":{"extraToml":"` + extra + `"},` + clients + `}`)
+		if err == nil || !strings.Contains(err.Error(), `may not set "include"`) {
+			t.Errorf("%q: error = %v, want the include refused", extra, err)
+		}
+	}
+	inst := telemtInst(SecretEntry{Name: "alice", Secret: eeSecret(keyAlice, "example.com")})
+	inst.Telemt.ExtraTOML = "[censorship]\ninclude = \"/etc/shadow\"\nmask = true\n"
+	if got := renderTelemtMain(inst, telemtRuntime{}); strings.Contains(got, "shadow") {
+		t.Fatalf("a nested include must not reach telemt.toml:\n%s", got)
+	}
+}
+
+// TestTelemtFingerprintIsQuiet: the reconcile tick fingerprints every inbound every
+// 10s, so only an actual render may warn about dropped extra TOML.
+func TestTelemtFingerprintIsQuiet(t *testing.T) {
+	ghost := fmt.Sprintf("ghost-%d", time.Now().UnixNano())
+	inst := telemtInst(SecretEntry{Name: "alice", Secret: eeSecret(keyAlice, "example.com")})
+	inst.Telemt.ExtraTOML = "[[web.vhosts]]\nhost = \"w\"\n[[web.vhosts.profiles]]\nuser = \"" + ghost + "\"\n"
+	warnings := func() int {
+		n := 0
+		for _, line := range logger.GetLogs(5000, "warning") {
+			if strings.Contains(line, ghost) {
+				n++
+			}
+		}
+		return n
+	}
+	for range 3 {
+		telemtMainFingerprint(inst)
+	}
+	if n := warnings(); n != 0 {
+		t.Fatalf("fingerprinting logged %d warning(s)", n)
+	}
+	renderTelemtMain(inst, telemtRuntime{apiPort: 1, metricsPort: 2})
+	if n := warnings(); n != 1 {
+		t.Fatalf("the render must warn once about the dropped profile, got %d", n)
 	}
 }

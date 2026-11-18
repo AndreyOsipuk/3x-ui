@@ -171,9 +171,9 @@ type Manager struct {
 	// swept records that the one-time startup cleanup of orphaned mtg
 	// processes (survivors of a previous x-ui run) has already run.
 	swept bool
-	// failedStart holds, per inbound, the telemt config telemt refused to start
-	// with, so the reconcile tick does not restart it in a loop.
-	failedStart   map[int]string
+	// failedStart holds, per inbound, the config telemt refused to start with, so
+	// the reconcile tick retries it only after telemtRetryAfter, not in a loop.
+	failedStart   map[int]failedStart
 	newTelemtProc func(configPath, workDir, label string) *Process
 }
 
@@ -183,7 +183,7 @@ var (
 )
 
 func newManager() *Manager {
-	return &Manager{procs: map[int]*managed{}, failedStart: map[int]string{}, newTelemtProc: newTelemtProcess}
+	return &Manager{procs: map[int]*managed{}, failedStart: map[int]failedStart{}, newTelemtProc: newTelemtProcess}
 }
 
 // GetManager returns the process-wide mtg manager singleton.
@@ -566,7 +566,9 @@ func (m *Manager) CollectTraffic() ([]Traffic, []string) {
 				online = append(online, email)
 			}
 			prev, had := s.last[email]
-			if !had {
+			// telemt starts a user's counters at zero when it first sees them, so its first
+			// reading is all new traffic; mtg keeps skipping its first reading as before.
+			if !had && s.metricsPort == 0 {
 				continue
 			}
 			du := up - prev.up
